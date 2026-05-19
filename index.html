@@ -7,36 +7,51 @@
 <style>
 *{margin:0;padding:0}
 html,body{width:100%;height:100%;overflow:hidden;background:#000}
-iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:none}
+#player{position:absolute;top:0;left:0;width:100%;height:100%}
 </style>
 </head>
 <body>
+<div id="player"></div>
 <script>
-(function(){
-  var p = new URLSearchParams(window.location.search);
-  var v = p.get('v');
-  if(!v) return;
+var p = new URLSearchParams(window.location.search);
+var videoId = p.get('v');
+var doLoop = p.get('loop') === '1';
+var showControls = p.get('controls') === '1' ? 1 : 0;
+var volume = parseInt(p.get('vol')) || 100;
 
-  var autoplay = p.get('autoplay') !== '0' ? 1 : 0;
-  var mute     = p.get('mute')     === '1' ? 1 : 0;
-  var loop     = p.get('loop')     === '1' ? 1 : 0;
-  var controls = p.get('controls') === '1' ? 1 : 0;
+if (videoId) {
+  var tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+}
 
-  var src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v)
-    + '?autoplay=' + autoplay
-    + '&mute=' + mute
-    + '&loop=' + loop
-    + '&controls=' + controls
-    + '&rel=0&modestbranding=1&playsinline=1';
-
-  if(loop) src += '&playlist=' + encodeURIComponent(v);
-
-  var f = document.createElement('iframe');
-  f.src = src;
-  f.allow = 'autoplay; encrypted-media; fullscreen';
-  f.allowFullscreen = true;
-  document.body.appendChild(f);
-})();
+var player;
+function onYouTubeIframeAPIReady() {
+  player = new YT.Player('player', {
+    videoId: videoId,
+    playerVars: {
+      autoplay: 1,
+      mute: 1,
+      controls: showControls,
+      rel: 0,
+      modestbranding: 1,
+      playsinline: 1,
+      loop: doLoop ? 1 : 0,
+      playlist: doLoop ? videoId : undefined
+    },
+    events: {
+      onReady: function(e) {
+        e.target.playVideo();
+      },
+      onStateChange: function(e) {
+        if (e.data === YT.PlayerState.PLAYING) {
+          e.target.unMute();
+          e.target.setVolume(volume);
+        }
+      }
+    }
+  });
+}
 </script>
 </body>
 </html>
