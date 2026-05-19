@@ -18,6 +18,7 @@ var videoId = p.get('v');
 var doLoop = p.get('loop') === '1';
 var showControls = p.get('controls') === '1' ? 1 : 0;
 var volume = parseInt(p.get('vol')) || 100;
+var unmuted = false;
 
 if (videoId) {
   var tag = document.createElement('script');
@@ -42,11 +43,16 @@ function onYouTubeIframeAPIReady() {
     events: {
       onReady: function(e) {
         e.target.playVideo();
-      },
-      onStateChange: function(e) {
-        if (e.data === YT.PlayerState.PLAYING) {
+        setTimeout(function() {
           e.target.unMute();
           e.target.setVolume(volume);
+          e.target.playVideo();
+          unmuted = true;
+        }, 1500);
+      },
+      onStateChange: function(e) {
+        if (unmuted && e.data === YT.PlayerState.PAUSED) {
+          e.target.playVideo();
         }
       }
     }
