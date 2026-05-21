@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  ════════════════════════════════════════════════════════════════
+  YOUTUBE PLAYER fuer fizzi_monitor (GitHub Pages Version)
+  Auf https://befizzi.github.io/galaxy-video.github.io/index.html
+  einfuegen und committen.
+  ════════════════════════════════════════════════════════════════
+-->
 <html>
 <head>
 <meta charset="utf-8">
@@ -16,9 +23,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000}
 var p = new URLSearchParams(window.location.search);
 var videoId = p.get('v');
 var doLoop = p.get('loop') === '1';
-var showControls = p.get('controls') === '1' ? 1 : 0;
-var volume = parseInt(p.get('vol')) || 100;
-var unmuted = false;
+var startAt = parseFloat(p.get('t')) || 0;
+var volume = parseInt(p.get('vol'));
+if (isNaN(volume)) volume = 100;
+
+var player = null;
+var playerReady = false;
+var currentVideoId = videoId;
+var adSkipCount = 0;
+var lastReload = 0;
 
 if (videoId) {
   var tag = document.createElement('script');
@@ -26,33 +39,233 @@ if (videoId) {
   document.head.appendChild(tag);
 }
 
-var player;
+// ════════════════════════════════════════════════════════
+// VOLUME
+// ════════════════════════════════════════════════════════
+function applyVolume() {
+  if (!player || !playerReady) return;
+  try {
+    player.setVolume(volume);
+    if (volume <= 0) player.mute();
+    else player.unMute();
+  } catch(e) {}
+  walkAllDocs(function(doc) {
+    var vids = doc.querySelectorAll('video,audio');
+    for (var i = 0; i < vids.length; i++) {
+      try {
+        vids[i].volume = volume / 100;
+        vids[i].muted = volume <= 0;
+      } catch(e) {}
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════
+// IFRAME-WALKER — geht rekursiv durch alle Dokumente
+// ════════════════════════════════════════════════════════
+function walkAllDocs(callback) {
+  function walk(doc) {
+    if (!doc) return;
+    try { callback(doc); } catch(e) {}
+    var iframes;
+    try { iframes = doc.querySelectorAll('iframe'); } catch(e) { return; }
+    for (var i = 0; i < iframes.length; i++) {
+      var subDoc = null;
+      try { subDoc = iframes[i].contentDocument; } catch(e) {}
+      if (!subDoc) {
+        try { subDoc = iframes[i].contentWindow.document; } catch(e) {}
+      }
+      if (subDoc) walk(subDoc);
+    }
+  }
+  walk(document);
+}
+
+// ════════════════════════════════════════════════════════
+// FEUERWERK: BRUTAL ALLE CLICK-EVENTS DISPATCHEN
+// ════════════════════════════════════════════════════════
+function fireClickAllWays(el) {
+  if (!el) return;
+  try {
+    var rect = el.getBoundingClientRect();
+    var x = rect.left + rect.width / 2;
+    var y = rect.top + rect.height / 2;
+
+    // 1) Native click
+    try { el.click(); } catch(e) {}
+
+    // 2) Pointer Events (modern)
+    try {
+      ['pointerover','pointerenter','pointerdown','pointerup'].forEach(function(t) {
+        var ev = new PointerEvent(t, {
+          bubbles: true, cancelable: true, view: window,
+          clientX: x, clientY: y, button: 0, buttons: 1,
+          pointerType: 'mouse', isPrimary: true
+        });
+        el.dispatchEvent(ev);
+      });
+    } catch(e) {}
+
+    // 3) Mouse Events (legacy)
+    try {
+      ['mouseover','mouseenter','mousedown','mouseup','click'].forEach(function(t) {
+        var ev = new MouseEvent(t, {
+          bubbles: true, cancelable: true, view: window,
+          clientX: x, clientY: y, button: 0, buttons: 1
+        });
+        el.dispatchEvent(ev);
+      });
+    } catch(e) {}
+
+    // 4) Touch Events
+    try {
+      var touchInit = { bubbles: true, cancelable: true, view: window };
+      el.dispatchEvent(new Event('touchstart', touchInit));
+      el.dispatchEvent(new Event('touchend', touchInit));
+    } catch(e) {}
+
+    // 5) Parent-Button auch klicken (button > div > span)
+    var btn = (el.closest && el.closest('button')) || el.parentElement;
+    if (btn && btn !== el) {
+      try { btn.click(); } catch(e) {}
+    }
+  } catch(e) {}
+}
+
+// ════════════════════════════════════════════════════════
+// SKIP — sucht und klickt den Button in ALLEN iframes
+// ════════════════════════════════════════════════════════
+var SKIP_SELECTORS = [
+  'button.ytp-ad-skip-button-modern',
+  '.ytp-ad-skip-button-modern',
+  '.ytp-ad-skip-button',
+  'button.ytp-ad-skip-button',
+  '.ytp-skip-ad-button',
+  'button.ytp-skip-ad-button',
+  '.ytp-ad-skip-button-slot button',
+  '.ytp-ad-skip-button-container button',
+  '.ytp-ad-skip-button-container',
+  '.ytp-ad-skip-button-text',
+  '.videoAdUiSkipButton',
+  '.videoAdUiSkipContainer',
+  '[id^="ad-text"]',
+  '[id^="skip-button"]',
+  '.ytp-ad-overlay-close-button',
+  '.ytp-ad-overlay-close-container'
+];
+
+function clickSkipButtons() {
+  var clicked = false;
+  walkAllDocs(function(doc) {
+    for (var s = 0; s < SKIP_SELECTORS.length; s++) {
+      var els;
+      try { els = doc.querySelectorAll(SKIP_SELECTORS[s]); } catch(e) { continue; }
+      for (var i = 0; i < els.length; i++) {
+        fireClickAllWays(els[i]);
+        clicked = true;
+      }
+    }
+  });
+  return clicked;
+}
+
+function isAdPlaying() {
+  if (!player || !playerReady) return false;
+  try {
+    var d = player.getVideoData();
+    if (d && d.video_id && currentVideoId && d.video_id !== currentVideoId) return true;
+  } catch(e) {}
+  return false;
+}
+
+function reloadVideo() {
+  var now = Date.now();
+  if (now - lastReload < 3000) return; // nicht zu oft
+  if (adSkipCount >= 8) {
+    try { player.mute(); } catch(e) {} // bei zu vielen Versuchen: stumm
+    return;
+  }
+  lastReload = now;
+  adSkipCount++;
+  try {
+    player.loadVideoById({ videoId: currentVideoId, startSeconds: 0 });
+    setTimeout(applyVolume, 1500);
+  } catch(e) {}
+}
+
+function forceSkipAd() {
+  // 1) Skip-Button im iframe klicken (brutal)
+  clickSkipButtons();
+  // 2) Undokumentierte API
+  try { if (typeof player.skipAd === 'function') player.skipAd(); } catch(e) {}
+  // 3) Werbung laeuft? Direkt zum Video springen via loadVideoById
+  if (isAdPlaying()) {
+    reloadVideo();
+  } else if (adSkipCount > 0) {
+    // Werbung beendet → Counter resetten
+    adSkipCount = 0;
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// LOOPS — sehr aggressiv
+// ════════════════════════════════════════════════════════
+setInterval(clickSkipButtons, 250); // Skip-Button Klick alle 250ms
+setInterval(forceSkipAd, 1000);      // Volle Skip-Logik alle 1s
+setInterval(applyVolume, 1000);      // Volume erzwingen
+
+// ════════════════════════════════════════════════════════
+// POSTMESSAGE (vom Wrapper falls vorhanden)
+// ════════════════════════════════════════════════════════
+window.addEventListener('message', function(event) {
+  var data = event.data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch(e) { return; }
+  }
+  if (!data || !data.type) return;
+  if (data.event === 'onReady' || data.event === 'onStateChange' || data.event === 'infoDelivery') return;
+
+  if (data.type === 'setVolume') {
+    var v = parseFloat(data.volume);
+    if (!isNaN(v)) { volume = Math.round(v * 100); applyVolume(); }
+  }
+  if (data.type === 'skipAd') { forceSkipAd(); }
+});
+
+// ════════════════════════════════════════════════════════
+// YOUTUBE API
+// ════════════════════════════════════════════════════════
 function onYouTubeIframeAPIReady() {
   player = new YT.Player('player', {
     videoId: videoId,
     playerVars: {
       autoplay: 1,
       mute: 1,
-      controls: showControls,
+      controls: 0,
       rel: 0,
       modestbranding: 1,
       playsinline: 1,
+      enablejsapi: 1,
+      start: Math.floor(startAt),
       loop: doLoop ? 1 : 0,
       playlist: doLoop ? videoId : undefined
     },
     events: {
       onReady: function(e) {
-        e.target.playVideo();
+        playerReady = true;
+        try { e.target.playVideo(); } catch(ex) {}
         setTimeout(function() {
-          e.target.unMute();
-          e.target.setVolume(volume);
-          e.target.playVideo();
-          unmuted = true;
+          try { e.target.unMute(); e.target.setVolume(volume); e.target.playVideo(); } catch(ex) {}
+          applyVolume();
         }, 1500);
       },
       onStateChange: function(e) {
-        if (unmuted && e.data === YT.PlayerState.PAUSED) {
-          e.target.playVideo();
+        if (e.data === YT.PlayerState.PLAYING) {
+          setTimeout(forceSkipAd, 100);
+          setTimeout(applyVolume, 300);
+        }
+        if (e.data === YT.PlayerState.PAUSED && volume > 0 && !isAdPlaying()) {
+          try { e.target.playVideo(); } catch(ex) {}
         }
       }
     }
