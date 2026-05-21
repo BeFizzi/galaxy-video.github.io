@@ -36,97 +36,99 @@ var adActive    = false;
 // ════════════════════════════════════════════════════════
 function applyVolume() {
   if (!player || !playerReady) return;
-  try {
-    player.setVolume(volume);
-    if (volume <= 0) player.mute();
-    else             player.unMute();
-  } catch(e) {}
+  try { player.setVolume(volume); if (volume <= 0) player.mute(); else player.unMute(); } catch(e) {}
 }
 
 // ════════════════════════════════════════════════════════
-// SKIP-BUTTON KLICKEN
-// In FiveM CEF kann contentDocument erreichbar sein.
-// Gleichzeitig: postMessage direkt an den YouTube-iframe.
+// SKIP — Script-Injection in den YouTube-iframe
+//
+// Normales dispatchEvent hat isTrusted=false → YouTube ignoriert es.
+// Stattdessen: Script-Tag in den iframe-Kontext injizieren.
+// Der Script laeuft im selben Origin-Kontext des YouTube-iframes
+// und ruft btn.click() nativ auf — das klappt in FiveM CEF.
 // ════════════════════════════════════════════════════════
-var SKIP_SEL = [
-  'button.ytp-ad-skip-button-modern',
-  '.ytp-ad-skip-button-modern',
-  'button.ytp-ad-skip-button',
-  '.ytp-ad-skip-button',
-  '.ytp-skip-ad-button',
-  '.ytp-ad-skip-button-slot button',
-  '.ytp-ad-skip-button-container button',
-  '.ytp-ad-overlay-close-button',
-];
 
-function clickEl(el, win) {
-  if (!el) return;
-  try { el.click(); } catch(e) {}
-  try {
-    var rect = el.getBoundingClientRect();
-    var cx = rect.left + rect.width / 2;
-    var cy = rect.top  + rect.height / 2;
-    var w  = win || window;
-    ['pointerdown','pointerup','mousedown','mouseup','click'].forEach(function(t) {
-      try {
-        el.dispatchEvent(new MouseEvent(t, {
-          bubbles: true, cancelable: true, view: w, clientX: cx, clientY: cy
-        }));
-      } catch(ex) {}
-    });
-  } catch(e) {}
-  try {
-    var btn = el.closest && el.closest('button');
-    if (btn && btn !== el) btn.click();
-  } catch(e) {}
-}
+// Dieser Code wird als String in den YouTube-iframe injiziert
+var INJECT_SRC = [
+  '(function(){',
+  '  var sel=[',
+  '    "button.ytp-ad-skip-button-modern",',
+  '    ".ytp-ad-skip-button-modern",',
+  '    "button.ytp-ad-skip-button",',
+  '    ".ytp-ad-skip-button",',
+  '    ".ytp-skip-ad-button",',
+  '    ".ytp-ad-overlay-close-button",',
+  '    ".ytp-ad-skip-button-container button",',
+  '  ];',
+  '  for(var i=0;i<sel.length;i++){',
+  '    var els=document.querySelectorAll(sel[i]);',
+  '    for(var j=0;j<els.length;j++){',
+  '      try{ els[j].click(); }catch(e){}',
+  '    }',
+  '  }',
+  '  // Auch in verschachtelten iframes',
+  '  var frames=document.querySelectorAll("iframe");',
+  '  for(var f=0;f<frames.length;f++){',
+  '    try{',
+  '      var d=frames[f].contentDocument||frames[f].contentWindow.document;',
+  '      for(var i=0;i<sel.length;i++){',
+  '        var b=d.querySelector(sel[i]);',
+  '        if(b) b.click();',
+  '      }',
+  '    }catch(e){}',
+  '  }',
+  '})();',
+].join('\n');
 
-function tryClickInDoc(doc, win) {
+function injectSkipScript(doc) {
   if (!doc) return;
-  for (var s = 0; s < SKIP_SEL.length; s++) {
-    var els;
-    try { els = doc.querySelectorAll(SKIP_SEL[s]); } catch(e) { continue; }
-    for (var i = 0; i < els.length; i++) { clickEl(els[i], win); }
-  }
-  // Rekursiv in verschachtelten iframes
-  var frames;
-  try { frames = doc.querySelectorAll('iframe'); } catch(e) { return; }
-  for (var f = 0; f < frames.length; f++) {
-    var d = null;
-    var w = null;
-    try { d = frames[f].contentDocument; w = frames[f].contentWindow; } catch(e) {}
-    if (!d) try { d = frames[f].contentWindow && frames[f].contentWindow.document; } catch(e) {}
-    if (d) tryClickInDoc(d, w);
-  }
+  try {
+    var s = doc.createElement('script');
+    s.textContent = INJECT_SRC;
+    (doc.head || doc.body || doc.documentElement).appendChild(s);
+    try { s.parentNode.removeChild(s); } catch(e) {}
+  } catch(e) {}
 }
 
 function clickSkipButtons() {
-  // 1) Im Hauptdokument suchen
-  tryClickInDoc(document, window);
+  // IFrame-API skipAd versuchen
+  try { if (player && typeof player.skipAd === 'function') player.skipAd(); } catch(e) {}
 
-  // 2) In allen iframes (YouTube-Player)
+  // Alle iframes durchsuchen
   var iframes = document.querySelectorAll('iframe');
   for (var i = 0; i < iframes.length; i++) {
-    var iframe = iframes[i];
-    var doc = null, win = null;
+    var doc = null;
+    try { doc = iframes[i].contentDocument; }               catch(e) {}
+    if (!doc) try { doc = iframes[i].contentWindow.document; } catch(e) {}
 
-    // DOM-Zugriff (klappt in FiveM CEF wenn cross-origin erlaubt)
-    try { win = iframe.contentWindow; doc = iframe.contentDocument; } catch(e) {}
-    if (!doc && win) try { doc = win.document; } catch(e) {}
-    if (doc) tryClickInDoc(doc, win);
+    if (doc) {
+      // 1) Direkter querySelector + click()
+      var sel = [
+        'button.ytp-ad-skip-button-modern',
+        '.ytp-ad-skip-button-modern',
+        'button.ytp-ad-skip-button',
+        '.ytp-ad-skip-button',
+        '.ytp-skip-ad-button',
+        '.ytp-ad-overlay-close-button',
+      ];
+      for (var s = 0; s < sel.length; s++) {
+        var els;
+        try { els = doc.querySelectorAll(sel[s]); } catch(ex) { continue; }
+        for (var j = 0; j < els.length; j++) {
+          try { els[j].click(); } catch(ex) {}
+        }
+      }
+      // 2) Script-Injection — laeuft im iframe-Origin-Kontext
+      injectSkipScript(doc);
+    }
 
-    // postMessage direkt an YouTube-iframe — YouTube hoert auf "command"-Messages
+    // postMessage an den iframe (YouTube command-API)
     try {
-      iframe.contentWindow.postMessage(JSON.stringify({
-        event: 'command',
-        func:  'skipAd',
-        args:  []
-      }), '*');
+      iframes[i].contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func: 'skipAd', args: [] }), '*'
+      );
     } catch(e) {}
   }
-
-  // 3) IFrame-API skipAd (undokumentiert aber harmlos)
-  try { if (player && typeof player.skipAd === 'function') player.skipAd(); } catch(e) {}
 }
 
 // ════════════════════════════════════════════════════════
@@ -136,12 +138,12 @@ function isAdPlaying() {
   if (!player || !playerReady) return false;
   try {
     var d = player.getVideoData();
-    if (d && (!d.video_id || d.video_id === ''))       return true;
-    if (d && videoId && d.video_id !== videoId)         return true;
+    if (d && (!d.video_id || d.video_id === ''))      return true;
+    if (d && videoId && d.video_id !== videoId)        return true;
   } catch(e) {}
   try {
     var opts = player.getOptions('ad');
-    if (opts && opts.length > 0)                        return true;
+    if (opts && opts.length > 0)                       return true;
   } catch(e) {}
   return false;
 }
@@ -149,8 +151,7 @@ function isAdPlaying() {
 function onAdDetected() {
   if (!adActive) {
     adActive = true;
-    // Stumm — falls Skip nicht klappt hoert man die Werbung nicht
-    try { player.setVolume(0); player.mute(); } catch(e) {}
+    try { player.setVolume(0); player.mute(); } catch(e) {} // stumm als Fallback
   }
   clickSkipButtons();
 }
@@ -164,7 +165,6 @@ function onAdEnded() {
 // ════════════════════════════════════════════════════════
 // INTERVALLE
 // ════════════════════════════════════════════════════════
-// Skip-Versuch alle 200ms (schnell genug um den Moment zu erwischen)
 setInterval(function() {
   if (!player || !playerReady) return;
   if (isAdPlaying()) onAdDetected();
@@ -174,13 +174,11 @@ setInterval(function() {
 setInterval(applyVolume, 2000);
 
 // ════════════════════════════════════════════════════════
-// POSTMESSAGE — YouTube infoDelivery + eigene Kommandos
+// POSTMESSAGE
 // ════════════════════════════════════════════════════════
 window.addEventListener('message', function(event) {
   var data = event.data;
-  if (typeof data === 'string') {
-    try { data = JSON.parse(data); } catch(e) { return; }
-  }
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch(e) { return; } }
   if (!data) return;
 
   if (data.type === 'setVolume') {
@@ -188,16 +186,11 @@ window.addEventListener('message', function(event) {
     if (!isNaN(v)) { volume = Math.round(v * 100); if (!adActive) applyVolume(); }
     return;
   }
-  if (data.type === 'skipAd') {
-    clickSkipButtons();
-    return;
-  }
+  if (data.type === 'skipAd') { clickSkipButtons(); return; }
 
-  // YouTube infoDelivery
   if (data.event === 'infoDelivery' && data.info && data.info.videoData) {
-    var vd   = data.info.videoData;
-    var isAd = (!vd.video_id || vd.video_id === '')
-            || (videoId && vd.video_id !== videoId);
+    var vd = data.info.videoData;
+    var isAd = (!vd.video_id || vd.video_id === '') || (videoId && vd.video_id !== videoId);
     if (isAd) onAdDetected();
     else      onAdEnded();
   }
@@ -217,19 +210,11 @@ function onYouTubeIframeAPIReady() {
     host: 'https://www.youtube-nocookie.com',
     videoId: videoId,
     playerVars: {
-      autoplay:       1,
-      mute:           1,
-      controls:       0,
-      rel:            0,
-      modestbranding: 1,
-      playsinline:    1,
-      enablejsapi:    1,
-      start:          Math.floor(startAt),
-      loop:           doLoop ? 1 : 0,
-      playlist:       doLoop ? videoId : undefined,
-      iv_load_policy: 3,
-      fs:             0,
-      origin:         window.location.origin,
+      autoplay: 1, mute: 1, controls: 0, rel: 0,
+      modestbranding: 1, playsinline: 1, enablejsapi: 1,
+      start: Math.floor(startAt),
+      loop: doLoop ? 1 : 0, playlist: doLoop ? videoId : undefined,
+      iv_load_policy: 3, fs: 0, origin: window.location.origin,
     },
     events: {
       onReady: function(e) {
@@ -241,20 +226,14 @@ function onYouTubeIframeAPIReady() {
       },
       onStateChange: function(e) {
         if (e.data === YT.PlayerState.PLAYING) {
-          setTimeout(function() {
-            if (!isAdPlaying()) onAdEnded();
-            else                onAdDetected();
-          }, 100);
+          setTimeout(function() { if (!isAdPlaying()) onAdEnded(); else onAdDetected(); }, 100);
         }
         if (e.data === YT.PlayerState.PAUSED && !adActive && volume > 0) {
           try { e.target.playVideo(); } catch(ex) {}
         }
       },
       onApiChange: function(e) {
-        try {
-          var opts = e.target.getOptions('ad');
-          if (opts && opts.length > 0) onAdDetected();
-        } catch(ex) {}
+        try { var o = e.target.getOptions('ad'); if (o && o.length) onAdDetected(); } catch(ex) {}
       }
     }
   });
